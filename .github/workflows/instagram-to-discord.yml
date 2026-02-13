@@ -64,6 +64,7 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           LOG_LEVEL: INFO
           SKIP_ON_FETCH_ERRORS: "true"
+          FETCH_TIMEOUT_SECONDS: "90"
         run: python scripts/instagram_to_discord.py
 
       - name: Save shortcode state cache

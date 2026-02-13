@@ -64,9 +64,11 @@ python scripts/instagram_to_discord.py --force-post
 - `MAX_DOWNLOAD_MB` (default: `20`)
 - `LOG_LEVEL` (default: `INFO`)
 - `SKIP_ON_FETCH_ERRORS` (default: `true`)
+- `FETCH_TIMEOUT_SECONDS` (default: `90`)
 
 ## Notes
 
 - GitHub Actions cannot natively subscribe to Instagram "new post" events, so this setup uses polling every 2 hours.
 - Instagram can temporarily return HTTP 429 for anonymous scraping; this workflow now treats those fetch errors as transient and retries on the next scheduled run.
+- The script uses a hard fetch timeout to avoid Instaloader waiting ~30 minutes inside a single run when rate limited.
 - If Instagram changes response behavior or rate limits access, retries or authenticated scraping may be needed.
