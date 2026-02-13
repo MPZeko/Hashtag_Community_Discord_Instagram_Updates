@@ -16,9 +16,10 @@ This repository contains a GitHub Actions automation that checks the latest post
 
 ## Required GitHub Secret
 
-Create this repository secret:
+Create these repository secrets:
 
 - `DISCORD_WEBHOOK_URL` – Webhook URL for the destination Discord channel.
+- `APIFY_API_TOKEN` – Optional but recommended; used for API-based Instagram fetch via Apify.
 
 ## Workflow
 
@@ -65,6 +66,8 @@ python scripts/instagram_to_discord.py --force-post
 - `LOG_LEVEL` (default: `INFO`)
 - `SKIP_ON_FETCH_ERRORS` (default: `true`)
 - `FETCH_TIMEOUT_SECONDS` (default: `90`)
+- `APIFY_API_TOKEN` (optional, recommended)
+- `PROVIDER_ORDER` (default: `apify,instaloader`)
 
 ## Notes
 
@@ -72,3 +75,10 @@ python scripts/instagram_to_discord.py --force-post
 - Instagram can temporarily return HTTP 429 for anonymous scraping; this workflow now treats those fetch errors as transient and retries on the next scheduled run.
 - The script uses a hard fetch timeout to avoid Instaloader waiting ~30 minutes inside a single run when rate limited.
 - If Instagram changes response behavior or rate limits access, retries or authenticated scraping may be needed.
+
+
+## Why API-based mode is recommended
+
+- Official Instagram Graph API only works reliably for accounts/pages you administrate, not arbitrary public accounts in most cases.
+- GitHub-hosted runners are often rate-limited (429) for direct scraping.
+- This project now prefers an API-based provider (Apify) and falls back to Instaloader if needed.
