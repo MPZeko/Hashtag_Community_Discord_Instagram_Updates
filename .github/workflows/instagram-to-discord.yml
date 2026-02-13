@@ -22,9 +22,14 @@ on:
           - "false"
           - "true"
 
+concurrency:
+  group: instagram-to-discord
+  cancel-in-progress: false
+
 jobs:
   publish-latest-instagram-post:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -58,6 +63,7 @@ jobs:
           FORCE_POST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_post || 'false' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
           LOG_LEVEL: INFO
+          SKIP_ON_FETCH_ERRORS: "true"
         run: python scripts/instagram_to_discord.py
 
       - name: Save shortcode state cache

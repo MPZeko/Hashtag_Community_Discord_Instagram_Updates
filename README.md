@@ -11,6 +11,8 @@ This repository contains a GitHub Actions automation that checks the latest post
 - Optional `dry_run` input to test fetching without sending anything to Discord.
 - Attempts to upload media directly to Discord (images/videos) so content can be viewed inside Discord when possible.
 - Includes fallback media links when direct upload is not possible.
+- Handles temporary Instagram rate limits (HTTP 429) gracefully by skipping the run and retrying on next schedule.
+- Uses workflow concurrency + timeout to avoid overlapping runs.
 
 ## Required GitHub Secret
 
@@ -61,8 +63,10 @@ python scripts/instagram_to_discord.py --force-post
 - `MAX_MEDIA_FILES` (default: `4`)
 - `MAX_DOWNLOAD_MB` (default: `20`)
 - `LOG_LEVEL` (default: `INFO`)
+- `SKIP_ON_FETCH_ERRORS` (default: `true`)
 
 ## Notes
 
 - GitHub Actions cannot natively subscribe to Instagram "new post" events, so this setup uses polling every 2 hours.
+- Instagram can temporarily return HTTP 429 for anonymous scraping; this workflow now treats those fetch errors as transient and retries on the next scheduled run.
 - If Instagram changes response behavior or rate limits access, retries or authenticated scraping may be needed.

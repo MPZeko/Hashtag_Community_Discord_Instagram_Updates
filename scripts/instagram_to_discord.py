@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,7 @@ class InstagramToDiscordBridge:
         dry_run: bool,
         max_media_files: int,
         max_download_mb: int,
+        skip_on_fetch_errors: bool,
     ) -> None:
         self.instagram_username = instagram_username
         self.discord_webhook_url = discord_webhook_url
@@ -59,10 +61,21 @@ class InstagramToDiscordBridge:
         self.dry_run = dry_run
         self.max_media_files = max_media_files
         self.max_download_bytes = max_download_mb * 1024 * 1024
+        self.skip_on_fetch_errors = skip_on_fetch_errors
 
     def run(self) -> int:
         """Run the bridge once. Returns 0 on success and non-zero on failure."""
-        latest_post = self._fetch_latest_post()
+        try:
+            latest_post = self._fetch_latest_post()
+        except Exception as err:  # pragma: no cover - depends on remote Instagram behavior
+            if self.skip_on_fetch_errors:
+                # Instagram can temporarily rate-limit anonymous requests (HTTP 429).
+                # For scheduled automation we treat this as a transient condition and
+                # exit successfully so the next schedule can retry instead of failing hard.
+                logging.warning("Skipping this run due to fetch error: %s", err)
+                return 0
+            raise
+
         previous_shortcode = self._load_last_shortcode()
 
         if not self.force_post and previous_shortcode == latest_post.shortcode:
@@ -95,6 +108,10 @@ class InstagramToDiscordBridge:
 
         profile = instaloader.Profile.from_username(loader.context, self.instagram_username)
         posts = profile.get_posts()
+
+        # Small pause helps avoid immediately hammering the endpoint in edge cases.
+        time.sleep(1)
+
         latest = next(posts, None)
         if latest is None:
             raise RuntimeError(f"No posts found for profile '{self.instagram_username}'.")
@@ -287,6 +304,12 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("LOG_LEVEL", "INFO"),
         help="Logging level (DEBUG, INFO, WARNING, ERROR).",
     )
+    parser.add_argument(
+        "--skip-on-fetch-errors",
+        action="store_true",
+        default=os.getenv("SKIP_ON_FETCH_ERRORS", "true").lower() == "true",
+        help="Return success if Instagram fetch fails (useful for temporary 429 rate limits).",
+    )
     return parser.parse_args()
 
 
@@ -309,6 +332,7 @@ def main() -> int:
         dry_run=args.dry_run,
         max_media_files=max(1, args.max_media_files),
         max_download_mb=max(1, args.max_download_mb),
+        skip_on_fetch_errors=args.skip_on_fetch_errors,
     )
     return bridge.run()
 
