@@ -1,0 +1,59 @@
+name: Instagram to Discord (Apify)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_latest:
+        description: "Post latest item even if already seen"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      dry_run:
+        description: "Fetch only (do not post to Discord)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+  schedule:
+    - cron: "0 */2 * * *"
+
+concurrency:
+  group: instagram-to-discord
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: .state
+          key: ig-state-${{ github.run_id }}
+          restore-keys: |
+            ig-state-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Run automation for @HashtagUtd
+        env:
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATE_PATH: ".state/ig_state.json"
+          FORCE_LATEST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_latest || 'false' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
+        run: |
+          python instagram_to_discord.py
