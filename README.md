@@ -1,17 +1,21 @@
 # Instagram → Discord Auto-Poster (Apify)
 
-This project checks new posts from `https://www.instagram.com/hashtagutd/` and sends only new posts to a Discord channel webhook.
+This project monitors only one Instagram account: **`https://www.instagram.com/HashtagUtd/`**.
 
-It uses the Apify actor `apidojo/instagram-scraper` with a small state file to deduplicate posts between runs.
+When new posts appear, they are sent to a Discord channel through a webhook.
 
 ## Features
 
+- Tracks only **@HashtagUtd**.
 - Scheduled run every 2 hours via GitHub Actions.
 - Manual run via **Run workflow** (`workflow_dispatch`).
+- Manual options:
+  - `force_latest=true` to post newest post immediately (even if already seen).
+  - `dry_run=true` to test fetch without posting.
 - Deduplication via `.state/ig_state.json` persisted by GitHub Actions cache.
-- Posts only new items to Discord.
-- Defensive parsing for actor output field differences (`id`, `shortCode`, `url`, etc.).
-- `DRY_RUN=1` support for manual testing without sending messages.
+- Attempts media-friendly Discord payloads:
+  - image preview in embed when an image URL is available,
+  - video URL included so users can open/play via Instagram when inline rendering is unavailable.
 
 ## Required secrets
 
@@ -30,10 +34,9 @@ It uses the Apify actor `apidojo/instagram-scraper` with a small state file to d
 
 - `APIFY_API_TOKEN` (required)
 - `DISCORD_WEBHOOK_URL` (required)
-- `IG_PROFILE_URL` (default: `https://www.instagram.com/hashtagutd/`)
-- `APIFY_ACTOR_ID` (default: `apidojo/instagram-scraper`)
 - `MAX_ITEMS` (default: `3`, range `1..50`)
 - `STATE_PATH` (default: `.state/ig_state.json`)
+- `FORCE_LATEST` (`1` = post newest regardless of state)
 - `DRY_RUN` (`1` = do not send to Discord)
 
 ## Local run
@@ -42,11 +45,14 @@ It uses the Apify actor `apidojo/instagram-scraper` with a small state file to d
 python -m pip install -U pip
 pip install -r requirements.txt
 
-# dry run (no Discord post)
+# test without posting
 DRY_RUN=1 APIFY_API_TOKEN=xxx DISCORD_WEBHOOK_URL=xxx python instagram_to_discord.py
+
+# manually post newest item
+FORCE_LATEST=1 APIFY_API_TOKEN=xxx DISCORD_WEBHOOK_URL=xxx python instagram_to_discord.py
 ```
 
 ## Notes
 
-- First run sends only the newest post to avoid flooding Discord with historical posts.
+- First normal run sends only the newest post to avoid flooding with historical posts.
 - Later runs send only unseen posts, oldest → newest.

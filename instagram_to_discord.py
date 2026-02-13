@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Instagram -> Discord via Apify posts actor.
+"""Instagram -> Discord for @HashtagUtd via Apify posts actor.
 
-- Runs Apify actor: apidojo/instagram-scraper
-- Fetches up to MAX_ITEMS newest posts for a profile URL
-- Dedupes using a state file (cached by GitHub Actions)
-- Posts only new items to Discord webhook
+- Uses Apify actor: apidojo/instagram-scraper
+- Tracks only: https://www.instagram.com/HashtagUtd/
+- Dedupes with local state file (cached by GitHub Actions)
+- Posts new items to Discord, including media preview hints when available
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from typing import Any
 import requests
 from apify_client import ApifyClient
 
-DEFAULT_PROFILE_URL = "https://www.instagram.com/hashtagutd/"
-DEFAULT_ACTOR_ID = "apidojo/instagram-scraper"
+PROFILE_URL = "https://www.instagram.com/HashtagUtd/"
+ACTOR_ID = "apidojo/instagram-scraper"
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -36,7 +36,6 @@ def load_state(state_path: Path) -> dict[str, Any]:
     try:
         return json.loads(state_path.read_text(encoding="utf-8"))
     except Exception:
-        # Corrupt state should not break automation.
         return {}
 
 
@@ -48,7 +47,6 @@ def save_state(state_path: Path, state: dict[str, Any]) -> None:
 
 
 def item_key(item: dict[str, Any]) -> str:
-    """Extract robust unique key from variant actor outputs."""
     for key in ("id", "shortCode", "shortcode", "code", "pk"):
         value = item.get(key)
         if isinstance(value, (str, int)) and str(value).strip():
@@ -61,32 +59,67 @@ def item_key(item: dict[str, Any]) -> str:
     return str(hash(json.dumps(item, sort_keys=True, default=str)))
 
 
-def item_url(item: dict[str, Any]) -> str | None:
+def item_url(item: dict[str, Any]) -> str:
     for key in ("url", "postUrl", "permalink"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return None
+    return PROFILE_URL
 
 
-def item_caption(item: dict[str, Any]) -> str | None:
+def item_caption(item: dict[str, Any]) -> str:
     for key in ("caption", "text", "title"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return None
+    return ""
 
 
-def fetch_items_apify(token: str, actor_id: str, profile_url: str, max_items: int) -> list[dict[str, Any]]:
-    """Run Apify actor and return dataset items as dicts."""
+def extract_media(item: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return (image_url, video_url) using defensive field matching."""
+    image_url = None
+    video_url = None
+
+    for key in ("displayUrl", "imageUrl", "thumbnailUrl"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            image_url = value.strip()
+            break
+
+    for key in ("videoUrl", "video_url"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            video_url = value.strip()
+            break
+
+    sidecar = item.get("childPosts")
+    if isinstance(sidecar, list):
+        for child in sidecar:
+            if not isinstance(child, dict):
+                continue
+            if not image_url:
+                value = child.get("displayUrl") or child.get("imageUrl")
+                if isinstance(value, str) and value.strip():
+                    image_url = value.strip()
+            if not video_url:
+                value = child.get("videoUrl")
+                if isinstance(value, str) and value.strip():
+                    video_url = value.strip()
+            if image_url and video_url:
+                break
+
+    return image_url, video_url
+
+
+def fetch_items_apify(token: str, max_items: int) -> list[dict[str, Any]]:
     client = ApifyClient(token)
     run_input = {
-        "startUrls": [profile_url],
+        "startUrls": [PROFILE_URL],
         "maxItems": max_items,
     }
 
-    print(f"[apify] actor={actor_id} profile={profile_url} maxItems={max_items}")
-    run = client.actor(actor_id).call(run_input=run_input)
+    print(f"[apify] actor={ACTOR_ID} profile={PROFILE_URL} maxItems={max_items}")
+    run = client.actor(ACTOR_ID).call(run_input=run_input)
 
     dataset_id = run.get("defaultDatasetId")
     if not dataset_id:
@@ -100,7 +133,6 @@ def fetch_items_apify(token: str, actor_id: str, profile_url: str, max_items: in
 
 
 def diff_new_items(items_newest_first: list[dict[str, Any]], last_seen_key: str | None) -> tuple[list[dict[str, Any]], str | None]:
-    """Return new items (oldest->newest) and key to persist."""
     if not items_newest_first:
         return [], last_seen_key
 
@@ -108,7 +140,6 @@ def diff_new_items(items_newest_first: list[dict[str, Any]], last_seen_key: str 
     newest_key = keys[0]
 
     if not last_seen_key:
-        # First run: post only the newest to avoid spamming backlog.
         return [items_newest_first[0]], newest_key
 
     new_chunk: list[dict[str, Any]] = []
@@ -123,20 +154,40 @@ def diff_new_items(items_newest_first: list[dict[str, Any]], last_seen_key: str 
     return list(reversed(new_chunk)), newest_key
 
 
-def post_to_discord(webhook_url: str, item: dict[str, Any], dry_run: bool = False) -> None:
-    url = item_url(item) or "https://www.instagram.com/"
-    caption = (item_caption(item) or "").strip()
+def build_payload(item: dict[str, Any]) -> dict[str, Any]:
+    url = item_url(item)
+    caption = item_caption(item)
     if len(caption) > 1500:
         caption = caption[:1497] + "..."
 
-    payload: dict[str, Any] = {"content": f"📸 New Instagram post: {url}"}
+    image_url, video_url = extract_media(item)
 
-    if caption:
-        payload["embeds"] = [{
-            "description": caption,
-            "url": url,
-        }]
+    content_lines = [f"📸 New Instagram post from **@HashtagUtd**", f"Post: {url}"]
+    if video_url:
+        # If Discord cannot render the video inline, users can still click through.
+        content_lines.append(f"Video: {video_url}")
 
+    embed: dict[str, Any] = {
+        "title": "New post from @HashtagUtd",
+        "url": url,
+        "description": caption or "No caption provided.",
+    }
+
+    if image_url:
+        embed["image"] = {"url": image_url}
+
+    if video_url:
+        embed["video"] = {"url": video_url}
+
+    return {
+        "content": "\n".join(content_lines),
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def post_to_discord(webhook_url: str, item: dict[str, Any], dry_run: bool = False) -> None:
+    payload = build_payload(item)
     if dry_run:
         print("[dry-run] would post:", json.dumps(payload, ensure_ascii=False))
         return
@@ -149,11 +200,10 @@ def post_to_discord(webhook_url: str, item: dict[str, Any], dry_run: bool = Fals
 def main() -> int:
     token = env("APIFY_API_TOKEN")
     webhook = env("DISCORD_WEBHOOK_URL")
-    profile_url = env("IG_PROFILE_URL", DEFAULT_PROFILE_URL)
-    actor_id = env("APIFY_ACTOR_ID", DEFAULT_ACTOR_ID)
     max_items_str = env("MAX_ITEMS", "3")
     state_path = Path(env("STATE_PATH", ".state/ig_state.json") or ".state/ig_state.json")
     dry_run = env("DRY_RUN", "0") == "1"
+    force_latest = env("FORCE_LATEST", "0") == "1"
 
     if not token:
         print("ERROR: APIFY_API_TOKEN is missing", file=sys.stderr)
@@ -174,13 +224,21 @@ def main() -> int:
     last_seen_key = state.get("last_seen_key") if isinstance(state.get("last_seen_key"), str) else None
 
     try:
-        items = fetch_items_apify(token, actor_id, profile_url or DEFAULT_PROFILE_URL, max_items)
+        items = fetch_items_apify(token, max_items)
     except Exception as err:
         print(f"ERROR: apify fetch failed: {err}", file=sys.stderr)
         return 1
 
     if not items:
         print("[info] no items returned")
+        return 0
+
+    if force_latest:
+        newest = items[0]
+        newest_key = item_key(newest)
+        print("[info] FORCE_LATEST enabled -> posting newest item")
+        post_to_discord(webhook, newest, dry_run=dry_run)
+        save_state(state_path, {"last_seen_key": newest_key, "updated_at": int(time.time())})
         return 0
 
     new_items, new_last_seen_key = diff_new_items(items, last_seen_key)
