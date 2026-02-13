@@ -52,7 +52,6 @@ jobs:
         env:
           APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          MAX_ITEMS: "3"
           STATE_PATH: ".state/ig_state.json"
           FORCE_LATEST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_latest || 'false' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}

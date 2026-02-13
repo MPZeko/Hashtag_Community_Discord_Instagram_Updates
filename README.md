@@ -2,7 +2,7 @@
 
 This project monitors only one Instagram account: **`https://www.instagram.com/HashtagUtd/`**.
 
-When new posts appear, they are sent to a Discord channel through a webhook.
+When a new post appears, it is sent to a Discord channel through webhook.
 
 ## Features
 
@@ -13,9 +13,11 @@ When new posts appear, they are sent to a Discord channel through a webhook.
   - `force_latest=true` to post newest post immediately (even if already seen).
   - `dry_run=true` to test fetch without posting.
 - Deduplication via `.state/ig_state.json` persisted by GitHub Actions cache.
-- Attempts media-friendly Discord payloads:
-  - image preview in embed when an image URL is available,
-  - video URL included so users can open/play via Instagram when inline rendering is unavailable.
+- Posts **only when latest post key changes**.
+- Media behavior:
+  - image preview in embed when available,
+  - video URL included as fallback link to Instagram when inline playback is unavailable.
+- If a post has no caption, the bot simply omits caption text (it no longer writes `No caption provided`).
 
 ## Required secrets
 
@@ -34,7 +36,6 @@ When new posts appear, they are sent to a Discord channel through a webhook.
 
 - `APIFY_API_TOKEN` (required)
 - `DISCORD_WEBHOOK_URL` (required)
-- `MAX_ITEMS` (default: `3`, range `1..50`)
 - `STATE_PATH` (default: `.state/ig_state.json`)
 - `FORCE_LATEST` (`1` = post newest regardless of state)
 - `DRY_RUN` (`1` = do not send to Discord)
@@ -54,5 +55,5 @@ FORCE_LATEST=1 APIFY_API_TOKEN=xxx DISCORD_WEBHOOK_URL=xxx python instagram_to_d
 
 ## Notes
 
-- First normal run sends only the newest post to avoid flooding with historical posts.
-- Later runs send only unseen posts, oldest → newest.
+- Normal mode fetches a single latest post candidate (`maxItems=1`) to keep API costs down.
+- Bot posts only if detected latest key differs from stored `last_seen_key`.
