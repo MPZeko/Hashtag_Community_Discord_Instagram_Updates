@@ -21,6 +21,9 @@ Create these repository secrets:
 - `DISCORD_WEBHOOK_URL` – Webhook URL for the destination Discord channel.
 - `APIFY_API_TOKEN` – Optional but recommended; used for API-based Instagram fetch via Apify.
 
+Dependency note:
+- `apify-client` and `apify-shared` are pinned to compatible major versions in `requirements.txt` to avoid import mismatches in CI.
+
 ## Workflow
 
 The automation lives in:
@@ -39,7 +42,8 @@ Triggers:
 Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+pip install --upgrade-strategy eager -r requirements.txt
 ```
 
 Dry-run test (no Discord post):

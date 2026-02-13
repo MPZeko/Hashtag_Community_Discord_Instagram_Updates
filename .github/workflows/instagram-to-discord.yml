@@ -41,7 +41,10 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade-strategy eager -r requirements.txt
+          python -c "import importlib.metadata as m; print('apify-client', m.version('apify-client')); print('apify-shared', m.version('apify-shared'))"
 
       - name: Restore shortcode state cache
         id: restore-cache
