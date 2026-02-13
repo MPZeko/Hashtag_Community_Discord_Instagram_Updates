@@ -1,88 +1,52 @@
-# Instagram → Discord Auto-Poster
+# Instagram → Discord Auto-Poster (Apify)
 
-This repository contains a GitHub Actions automation that checks the latest post from `instagram.com/HashtagUtd` and forwards it to a Discord channel using a webhook.
+This project checks new posts from `https://www.instagram.com/hashtagutd/` and sends only new posts to a Discord channel webhook.
+
+It uses the Apify actor `apidojo/instagram-scraper` with a small state file to deduplicate posts between runs.
 
 ## Features
 
-- Polls Instagram every 2 hours using GitHub Actions schedule.
-- Supports manual run via **Run workflow** (`workflow_dispatch`).
-- Avoids duplicate Discord posts by storing the latest posted shortcode in a cache-based state file.
-- Optional `force_post` input to repost the latest item during manual testing.
-- Optional `dry_run` input to test fetching without sending anything to Discord.
-- Attempts to upload media directly to Discord (images/videos) so content can be viewed inside Discord when possible.
-- Includes fallback media links when direct upload is not possible.
-- Handles temporary Instagram rate limits (HTTP 429) gracefully by skipping the run and retrying on next schedule.
-- Uses workflow concurrency + timeout to avoid overlapping runs.
+- Scheduled run every 2 hours via GitHub Actions.
+- Manual run via **Run workflow** (`workflow_dispatch`).
+- Deduplication via `.state/ig_state.json` persisted by GitHub Actions cache.
+- Posts only new items to Discord.
+- Defensive parsing for actor output field differences (`id`, `shortCode`, `url`, etc.).
+- `DRY_RUN=1` support for manual testing without sending messages.
 
-## Required GitHub Secret
+## Required secrets
 
-Create these repository secrets:
+- `APIFY_API_TOKEN`
+- `DISCORD_WEBHOOK_URL`
 
-- `DISCORD_WEBHOOK_URL` – Webhook URL for the destination Discord channel.
-- `APIFY_API_TOKEN` – Optional but recommended; used for API-based Instagram fetch via Apify.
+## Workflow file
 
-Dependency note:
-- `apify-client` and `apify-shared` are pinned to compatible major versions in `requirements.txt` to avoid import mismatches in CI.
+- `.github/workflows/instagram_to_discord.yml`
 
-## Workflow
+## Python entrypoint
 
-The automation lives in:
+- `instagram_to_discord.py`
 
-- `.github/workflows/instagram-to-discord.yml`
+## Environment variables
 
-Triggers:
+- `APIFY_API_TOKEN` (required)
+- `DISCORD_WEBHOOK_URL` (required)
+- `IG_PROFILE_URL` (default: `https://www.instagram.com/hashtagutd/`)
+- `APIFY_ACTOR_ID` (default: `apidojo/instagram-scraper`)
+- `MAX_ITEMS` (default: `3`, range `1..50`)
+- `STATE_PATH` (default: `.state/ig_state.json`)
+- `DRY_RUN` (`1` = do not send to Discord)
 
-- **Scheduled**: every 2 hours (`0 */2 * * *`)
-- **Manual**: run from GitHub Actions UI with options:
-  - `force_post`: `true/false`
-  - `dry_run`: `true/false`
-
-## Local test command
-
-Install dependencies:
+## Local run
 
 ```bash
-python -m pip install --upgrade pip
-pip install --upgrade-strategy eager -r requirements.txt
+python -m pip install -U pip
+pip install -r requirements.txt
+
+# dry run (no Discord post)
+DRY_RUN=1 APIFY_API_TOKEN=xxx DISCORD_WEBHOOK_URL=xxx python instagram_to_discord.py
 ```
-
-Dry-run test (no Discord post):
-
-```bash
-python scripts/instagram_to_discord.py --dry-run
-```
-
-Force post test:
-
-```bash
-python scripts/instagram_to_discord.py --force-post
-```
-
-## Environment Variables
-
-- `INSTAGRAM_USERNAME` (default: `HashtagUtd`)
-- `DISCORD_WEBHOOK_URL` (required unless dry-run)
-- `STATE_FILE` (default: `.cache/instagram_last_post.txt`)
-- `FORCE_POST` (`true/false`)
-- `DRY_RUN` (`true/false`)
-- `MAX_MEDIA_FILES` (default: `4`)
-- `MAX_DOWNLOAD_MB` (default: `20`)
-- `LOG_LEVEL` (default: `INFO`)
-- `SKIP_ON_FETCH_ERRORS` (default: `true`)
-- `FETCH_TIMEOUT_SECONDS` (default: `90`)
-- `APIFY_API_TOKEN` (optional, recommended)
-- `PROVIDER_ORDER` (default: `apify,instaloader`)
 
 ## Notes
 
-- GitHub Actions cannot natively subscribe to Instagram "new post" events, so this setup uses polling every 2 hours.
-- Instagram can temporarily return HTTP 429 for anonymous scraping; this workflow now treats those fetch errors as transient and retries on the next scheduled run.
-- The script uses a hard fetch timeout to avoid Instaloader waiting ~30 minutes inside a single run when rate limited.
-- If Instagram changes response behavior or rate limits access, retries or authenticated scraping may be needed.
-
-
-## Why API-based mode is recommended
-
-- Official Instagram Graph API only works reliably for accounts/pages you administrate, not arbitrary public accounts in most cases.
-- GitHub-hosted runners are often rate-limited (429) for direct scraping.
-- This project now prefers an API-based provider (Apify) and falls back to Instaloader if needed.
+- First run sends only the newest post to avoid flooding Discord with historical posts.
+- Later runs send only unseen posts, oldest → newest.
