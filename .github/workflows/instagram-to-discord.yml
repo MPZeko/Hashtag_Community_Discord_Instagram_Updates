@@ -1,0 +1,75 @@
+name: Instagram to Discord
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_post:
+        description: "Post latest item even if already posted"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      dry_run:
+        description: "Test fetch without sending to Discord"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: instagram-to-discord
+  cancel-in-progress: false
+
+jobs:
+  publish-latest-instagram-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore shortcode state cache
+        id: restore-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache
+          key: instagram-shortcode-${{ github.run_id }}
+          restore-keys: |
+            instagram-shortcode-
+
+      - name: Ensure state folder exists
+        run: mkdir -p .cache
+
+      - name: Fetch latest Instagram post and publish to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          INSTAGRAM_USERNAME: HashtagUtd
+          STATE_FILE: .cache/instagram_last_post.txt
+          FORCE_POST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_post || 'false' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
+          LOG_LEVEL: INFO
+          SKIP_ON_FETCH_ERRORS: "true"
+          FETCH_TIMEOUT_SECONDS: "90"
+        run: python scripts/instagram_to_discord.py
+
+      - name: Save shortcode state cache
+        if: always() && !cancelled()
+        uses: actions/cache/save@v4
+        with:
+          path: .cache
+          key: instagram-shortcode-${{ github.run_id }}
