@@ -1,59 +1,71 @@
-# Instagram → Discord Auto-Poster (Apify)
+# Instagram → Discord Auto-Poster
 
 This project monitors only one Instagram account: **`https://www.instagram.com/HashtagUtd/`**.
 
-When a new post appears, it is sent to a Discord channel through webhook.
+When a new post or reel appears, it is sent to a Discord channel through a webhook.
 
 ## Features
 
 - Tracks only **@HashtagUtd**.
-- Scheduled run every 2 hours via GitHub Actions.
-- Manual run via **Run workflow** (`workflow_dispatch`).
-- Manual options:
-  - `force_latest=true` to post newest post immediately (even if already seen).
-  - `dry_run=true` to test fetch without posting.
-- Deduplication via `.state/ig_state.json` persisted by GitHub Actions cache.
-- Posts **only when latest post key changes**.
-- Media behavior:
-  - image preview in embed when available,
-  - video URL included as fallback link to Instagram when inline playback is unavailable.
-- If a post has no caption, the bot simply omits caption text (it no longer writes `No caption provided`).
+- Scheduled/manual run in GitHub Actions.
+- Provider fallback strategy:
+  - `apify` first (`apify/instagram-scraper`, `resultsType=posts`, `resultsLimit=1`),
+  - then `instaloader` fallback.
+- Stable dedupe via latest shortcode persisted to `STATE_FILE` (default `.cache/instagram_last_post.txt`).
+- `force_post=true` always posts latest item (or dry-run preview).
+- `dry_run=true` fetches and logs what would be posted.
+- Discord robustness:
+  - retries on 429 (`Retry-After`) and 5xx,
+  - no mass mentions (`allowed_mentions.parse = []`),
+  - download size cap (`MAX_DOWNLOAD_MB`, default `8`).
 
 ## Required secrets
 
-- `APIFY_API_TOKEN`
 - `DISCORD_WEBHOOK_URL`
-
-## Workflow file
-
-- `.github/workflows/instagram_to_discord.yml`
+- `APIFY_API_TOKEN` (recommended; can be omitted if only using `instaloader` fallback)
 
 ## Python entrypoint
 
-- `instagram_to_discord.py`
+- `scripts/instagram_to_discord.py`
 
 ## Environment variables
 
-- `APIFY_API_TOKEN` (required)
-- `DISCORD_WEBHOOK_URL` (required)
-- `STATE_PATH` (default: `.state/ig_state.json`)
-- `FORCE_LATEST` (`1` = post newest regardless of state)
-- `DRY_RUN` (`1` = do not send to Discord)
+- `INSTAGRAM_USERNAME` (default: `HashtagUtd`)
+- `DISCORD_WEBHOOK_URL` (required unless `DRY_RUN=true`)
+- `STATE_FILE` (default: `.cache/instagram_last_post.txt`)
+- `FORCE_POST` (`true/false`)
+- `DRY_RUN` (`true/false`)
+- `APIFY_API_TOKEN`
+- `PROVIDER_ORDER` (default: `apify,instaloader`)
+- `SKIP_ON_FETCH_ERRORS` (default: `true`)
+- `FETCH_TIMEOUT_SECONDS` (default: `90`)
+- `MAX_MEDIA_FILES` (default: `4`)
+- `MAX_DOWNLOAD_MB` (default: `8`)
 
-## Local run
+## Local runbook
 
 ```bash
 python -m pip install -U pip
 pip install -r requirements.txt
 
-# test without posting
-DRY_RUN=1 APIFY_API_TOKEN=xxx DISCORD_WEBHOOK_URL=xxx python instagram_to_discord.py
-
-# manually post newest item
-FORCE_LATEST=1 APIFY_API_TOKEN=xxx DISCORD_WEBHOOK_URL=xxx python instagram_to_discord.py
+# smoke test (no Discord post)
+export INSTAGRAM_USERNAME="HashtagUtd"
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+export APIFY_API_TOKEN="..."
+export STATE_FILE=".cache/instagram_last_post.txt"
+export DRY_RUN="true"
+python scripts/instagram_to_discord.py
 ```
 
-## Notes
+## Production runbook (GitHub Actions)
 
-- Normal mode fetches a single latest post candidate (`maxItems=1`) to keep API costs down.
-- Bot posts only if detected latest key differs from stored `last_seen_key`.
+1. Run `workflow_dispatch` with `dry_run=true` first.
+2. Run again with `force_post=true` to verify Discord delivery.
+3. Return to normal schedule with `force_post=false`.
+
+## Typical failure cases
+
+- Missing `DISCORD_WEBHOOK_URL`: script exits unless `DRY_RUN=true`.
+- Missing/invalid `APIFY_API_TOKEN`: `apify` provider fails and script falls back to `instaloader` if configured.
+- Private/blocked profile or temporary scraping limits: fetch may fail; with `SKIP_ON_FETCH_ERRORS=true`, the job logs warning and exits successfully.
+- Discord 429/rate limits: webhook send retries up to 3 attempts.

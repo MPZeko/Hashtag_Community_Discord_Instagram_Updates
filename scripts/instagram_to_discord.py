@@ -4,6 +4,9 @@
 Provider strategy:
 1) Apify API (if APIFY_API_TOKEN is configured)
 2) Instaloader fallback (best effort)
+
+State:
+- Persists last seen shortcode to STATE_FILE (default: .cache/instagram_last_post.txt)
 """
 
 from __future__ import annotations
@@ -15,14 +18,17 @@ import mimetypes
 import multiprocessing as mp
 import os
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
 
-import instaloader
 import requests
+
+# Instaloader is optional at runtime (fallback). Keep import at top so dependency failures are obvious.
+import instaloader
 from apify_client import ApifyClient
 
 
@@ -43,28 +49,36 @@ class InstagramPost:
 
 
 def fetch_latest_post_via_apify(instagram_username: str, apify_token: str) -> InstagramPost:
-    """Fetch latest post via Apify Instagram scraper API.
+    """Fetch latest post via Apify Instagram scraper actor.
 
-    This is often more reliable on GitHub-hosted runners than direct scraping.
+    Important: Use resultsType=posts + resultsLimit=1 to reliably get actual post items.
     """
     client = ApifyClient(apify_token)
+
     run_input = {
         "usernames": [instagram_username],
         "resultsLimit": 1,
         "resultsType": "posts",
     }
+
+    logging.info("[apify] actor=apify/instagram-scraper usernames=%s resultsLimit=1 resultsType=posts", instagram_username)
     run = client.actor("apify/instagram-scraper").call(run_input=run_input)
-    dataset_id = run["defaultDatasetId"]
+
+    dataset_id = run.get("defaultDatasetId")
+    if not dataset_id:
+        raise RuntimeError("Apify run missing defaultDatasetId")
+
     items = list(client.dataset(dataset_id).iterate_items())
     if not items:
-        raise RuntimeError("Apify returned no posts.")
+        raise RuntimeError("Apify returned no posts (dataset empty).")
 
     item = items[0]
-    shortcode = item.get("shortCode") or item.get("id")
+    shortcode = (item.get("shortCode") or item.get("shortcode") or item.get("code") or item.get("id") or "").strip()
     if not shortcode:
-        raise RuntimeError("Apify item missing shortcode/id.")
+        raise RuntimeError("Apify item missing shortcode/id fields.")
 
-    caption = (item.get("caption") or "").strip()
+    caption = (item.get("caption") or item.get("text") or "").strip()
+
     timestamp = item.get("timestamp")
     if isinstance(timestamp, (int, float)):
         created_at = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -78,12 +92,11 @@ def fetch_latest_post_via_apify(instagram_username: str, apify_token: str) -> In
         media.append(MediaItem(url=item["displayUrl"], is_video=False))
 
     for child in item.get("childPosts") or []:
+        if not isinstance(child, dict):
+            continue
         url = child.get("videoUrl") or child.get("displayUrl")
         if url:
             media.append(MediaItem(url=url, is_video=bool(child.get("videoUrl"))))
-
-    if not media and item.get("url"):
-        media.append(MediaItem(url=item["url"], is_video=False))
 
     permalink = item.get("url") or f"https://www.instagram.com/p/{shortcode}/"
 
@@ -98,6 +111,7 @@ def fetch_latest_post_via_apify(instagram_username: str, apify_token: str) -> In
 
 
 def fetch_latest_post_via_instaloader(instagram_username: str) -> InstagramPost:
+    """Fallback scraper (best effort). Can hit rate limits; run with timeout wrapper."""
     loader = instaloader.Instaloader(
         sleep=False,
         quiet=True,
@@ -138,15 +152,16 @@ def _worker(provider: str, username: str, apify_token: str | None, queue: mp.Que
             post = fetch_latest_post_via_apify(username, apify_token)
         else:
             post = fetch_latest_post_via_instaloader(username)
+
         payload = asdict(post)
         payload["created_at"] = post.created_at.isoformat()
         queue.put(("ok", payload))
-    except Exception as err:  # pragma: no cover
+    except Exception as err:
         queue.put(("error", str(err)))
 
 
 def _run_provider_with_timeout(provider: str, username: str, apify_token: str | None, timeout_s: int) -> InstagramPost:
-    """Run provider in subprocess to avoid long hangs (e.g., Instaloader 429 sleep loops)."""
+    """Run provider in subprocess to avoid hangs."""
     ctx = mp.get_context("spawn")
     queue: mp.Queue = ctx.Queue()
     p = ctx.Process(target=_worker, args=(provider, username, apify_token, queue))
@@ -225,7 +240,7 @@ class InstagramToDiscordBridge:
     def run(self) -> int:
         try:
             latest = self._fetch_latest()
-        except Exception as err:  # pragma: no cover
+        except Exception as err:
             if self.skip_on_fetch_errors:
                 logging.warning("Skipping this run due to fetch error: %s", err)
                 return 0
@@ -236,8 +251,12 @@ class InstagramToDiscordBridge:
             logging.info("No new post detected. Latest shortcode: %s", latest.shortcode)
             return 0
 
+        logging.info("Will post shortcode=%s force_post=%s", latest.shortcode, self.force_post)
+
         if self.dry_run:
-            logging.info("Dry run enabled. Would post shortcode %s", latest.shortcode)
+            logging.info("Dry run enabled. Would post permalink=%s", latest.permalink)
+            self._save_last_shortcode(latest.shortcode)
+            logging.info("Dry run: updated state with shortcode %s", latest.shortcode)
             return 0
 
         with tempfile.TemporaryDirectory(prefix="instagram_media_") as tmp_dir:
@@ -262,6 +281,7 @@ class InstagramToDiscordBridge:
                     continue
                 ext = self._guess_extension(media.url, resp.headers.get("content-type"))
                 fp = output_dir / f"media_{idx + 1}{ext}"
+
                 written = 0
                 with fp.open("wb") as fh:
                     for chunk in resp.iter_content(chunk_size=64 * 1024):
@@ -289,14 +309,35 @@ class InstagramToDiscordBridge:
                 return guessed
         return ".bin"
 
+    def _post_with_retries(self, *, data=None, json_payload=None, files=None, timeout=60) -> requests.Response:
+        # Minimal retry handling for Discord rate limits / transient failures.
+        for attempt in range(1, 4):
+            resp = requests.post(self.discord_webhook_url, data=data, json=json_payload, files=files, timeout=timeout)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                sleep_s = float(retry_after) if retry_after else 2.0
+                logging.warning("Discord rate limited (429). Sleeping %.2fs (attempt %d/3).", sleep_s, attempt)
+                time.sleep(sleep_s)
+                continue
+            if 500 <= resp.status_code < 600:
+                logging.warning("Discord server error (%s). Retrying (attempt %d/3).", resp.status_code, attempt)
+                time.sleep(1.5 * attempt)
+                continue
+            return resp
+        return resp
+
     def _send_to_discord(self, post: InstagramPost, attachments: list[Path]) -> None:
+        # Discord embed description max is 4096; keep margin.
+        desc = post.caption[:3900] if post.caption else "No caption provided."
+
         embed = {
             "title": f"New Instagram post from @{post.username}",
             "url": post.permalink,
-            "description": post.caption[:3900] if post.caption else "No caption provided.",
+            "description": desc,
             "timestamp": post.created_at.astimezone(timezone.utc).isoformat(),
             "footer": {"text": f"Shortcode: {post.shortcode}"},
         }
+
         if not attachments:
             first_image = next((x.url for x in post.media_items if not x.is_video), None)
             if first_image:
@@ -304,7 +345,8 @@ class InstagramToDiscordBridge:
 
         media_lines = [f"{i + 1}. {m.url}" for i, m in enumerate(post.media_items)]
         payload = {
-            "content": f"📸 **Instagram update from @{post.username}**\nPost: {post.permalink}\nMedia links:\n" + "\n".join(media_lines),
+            "content": f"📸 **Instagram update from @{post.username}**\nPost: {post.permalink}\n"
+                       + ("Media links:\n" + "\n".join(media_lines) if media_lines else ""),
             "embeds": [embed],
             "allowed_mentions": {"parse": []},
         }
@@ -317,15 +359,20 @@ class InstagramToDiscordBridge:
                     h = path.open("rb")
                     handles.append(h)
                     files[f"files[{i}]"] = (path.name, h)
-                resp = requests.post(self.discord_webhook_url, data={"payload_json": json.dumps(payload)}, files=files, timeout=60)
+
+                resp = self._post_with_retries(
+                    data={"payload_json": json.dumps(payload)},
+                    files=files,
+                    timeout=60,
+                )
             finally:
                 for h in handles:
                     h.close()
         else:
-            resp = requests.post(self.discord_webhook_url, json=payload, timeout=30)
+            resp = self._post_with_retries(json_payload=payload, timeout=30)
 
         if resp.status_code >= 300:
-            raise RuntimeError(f"Discord webhook failed ({resp.status_code}): {resp.text}")
+            raise RuntimeError(f"Discord webhook failed ({resp.status_code}): {resp.text[:500]}")
 
     def _load_last_shortcode(self) -> str | None:
         if not self.state_file.exists():
@@ -345,7 +392,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--force-post", action="store_true", default=os.getenv("FORCE_POST", "false").lower() == "true")
     p.add_argument("--dry-run", action="store_true", default=os.getenv("DRY_RUN", "false").lower() == "true")
     p.add_argument("--max-media-files", type=int, default=int(os.getenv("MAX_MEDIA_FILES", "4")))
-    p.add_argument("--max-download-mb", type=int, default=int(os.getenv("MAX_DOWNLOAD_MB", "20")))
+    p.add_argument("--max-download-mb", type=int, default=int(os.getenv("MAX_DOWNLOAD_MB", "8")))
     p.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
     p.add_argument("--skip-on-fetch-errors", action="store_true", default=os.getenv("SKIP_ON_FETCH_ERRORS", "true").lower() == "true")
     p.add_argument("--fetch-timeout-seconds", type=int, default=int(os.getenv("FETCH_TIMEOUT_SECONDS", "90")))
@@ -363,12 +410,15 @@ def main() -> int:
     if not args.discord_webhook_url and not args.dry_run:
         raise SystemExit("DISCORD_WEBHOOK_URL is required unless --dry-run is used.")
 
-    logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO), format="%(asctime)s | %(levelname)s | %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
 
     providers = [x.strip() for x in args.provider_order.split(",") if x.strip()]
-    for p in providers:
-        if p not in {"apify", "instaloader"}:
-            raise SystemExit(f"Unsupported provider in PROVIDER_ORDER: {p}")
+    for prov in providers:
+        if prov not in {"apify", "instaloader"}:
+            raise SystemExit(f"Unsupported provider in PROVIDER_ORDER: {prov}")
 
     bridge = InstagramToDiscordBridge(
         instagram_username=args.instagram_username,
